@@ -141,7 +141,7 @@ def _run_one_round(pm: PolymarketClient, cfg, log) -> None:
                 if btc_current and btc_open:
                     log.debug("[SNIPE] open=%.2f cur=%.2f diff=%+.2f",
                               btc_open, btc_current, btc_current - btc_open)
-            elif secs_now > 0 and now_ts - last_ob_fetch >= 5.0:
+            elif secs_now > 0 and now_ts - last_ob_fetch >= 2.0:
                 for tid in tokens.values():
                     pm.fetch_orderbook_rest(tid)
                 last_ob_fetch = now_ts
