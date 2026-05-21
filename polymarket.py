@@ -101,6 +101,7 @@ class PolymarketClient:
         self._orderbooks: dict[str, OrderbookState] = {}
         self._client = None
         self._eoa_address: str = ""
+        self._order_lock = threading.Lock()
 
         self._setup_clob_client()
 
@@ -181,28 +182,24 @@ class PolymarketClient:
 
     # ── Market discovery ───────────────────────────────────────────────────────
 
-    def find_btc_5m_market(self) -> Optional[dict]:
-        """
-        Tìm BTC Up/Down 5m market active, kết thúc sớm nhất trong tương lai.
-        Trả về market dict (markets[0] từ event) hoặc None.
-        Slug pattern: btc-updown-5m-{(unix_now // 300) * 300}
-        """
+    def find_market(self, slug_prefix: str, interval_secs: int) -> Optional[dict]:
+        """Tìm market active theo slug_prefix và interval. Generic version."""
         now  = int(time.time())
-        base = (now // 300) * 300
-
-        # Thử round hiện tại và vài round lân cận
-        for offset in (0, -300, 300, -600, 600):
+        base = (now // interval_secs) * interval_secs
+        for offset in (0, -interval_secs, interval_secs, -2 * interval_secs, 2 * interval_secs):
             ts   = base + offset
-            slug = f"btc-updown-5m-{ts}"
+            slug = f"{slug_prefix}-{ts}"
             m    = self._fetch_market_by_event_slug(slug)
             if m is None:
                 continue
             end = self._parse_end_time(m)
             if end and end > datetime.now(timezone.utc):
-                self.log.debug("[MARKET] Dùng slug %s (end=%s)", slug, end)
+                self.log.debug("[MARKET] Slug %s (end=%s)", slug, end)
                 return m
-
         return None
+
+    def find_btc_5m_market(self) -> Optional[dict]:
+        return self.find_market("btc-updown-5m", 300)
 
     def _fetch_market_by_event_slug(self, slug: str) -> Optional[dict]:
         """Fetch markets[0] từ Gamma /events?slug=..., đính kèm event-level title/description."""
@@ -293,7 +290,8 @@ class PolymarketClient:
     # ── Orderbook ──────────────────────────────────────────────────────────────
 
     def init_orderbooks(self, token_ids: list[str]) -> None:
-        self._orderbooks = {tid: OrderbookState(tid) for tid in token_ids}
+        for tid in token_ids:
+            self._orderbooks[tid] = OrderbookState(tid)
 
     def fetch_orderbook_rest(self, token_id: str) -> bool:
         """Fetch orderbook qua REST. Returns True nếu thành công."""
@@ -571,45 +569,51 @@ class PolymarketClient:
             self.log.error("[REDEEM] Lỗi: %s", exc)
             return False
 
-    def get_btc_open_binance(self, round_start_ts: int) -> Optional[float]:
-        """5m candle open price tại đầu round. Retry tối đa 10 lần (candle có thể chưa xuất hiện ngay)."""
+    def get_price_open_binance(self, symbol: str, interval: str,
+                               round_start_ts: int, interval_secs: int) -> Optional[float]:
+        """Candle open price tại đầu round. Generic: hỗ trợ BTCUSDT/ETHUSDT, 5m/15m."""
         for attempt in range(10):
             try:
                 r = requests.get(
                     "https://fapi.binance.com/fapi/v1/klines",
-                    params={"symbol": "BTCUSDT", "interval": "5m",
+                    params={"symbol": symbol, "interval": interval,
                             "startTime": round_start_ts * 1000, "limit": 1},
                     timeout=5,
                 )
                 data = r.json()
                 if data and isinstance(data, list) and len(data) > 0:
                     open_time_ms = int(data[0][0])
-                    # Xác nhận candle đúng round (chênh lệch < 60s)
-                    if abs(open_time_ms / 1000 - round_start_ts) < 60:
+                    if abs(open_time_ms / 1000 - round_start_ts) < interval_secs:
                         price = float(data[0][1])
-                        self.log.debug("[SNIPE] btc_open attempt %d: %.2f", attempt + 1, price)
+                        self.log.debug("[SNIPE] %s open attempt %d: %.2f", symbol, attempt + 1, price)
                         return price
             except Exception as e:
-                self.log.debug("[SNIPE] get_btc_open_binance attempt %d loi: %s", attempt + 1, e)
+                self.log.debug("[SNIPE] get_price_open %s attempt %d: %s", symbol, attempt + 1, e)
             time.sleep(1)
-        self.log.warning("[SNIPE] Khong lay duoc btc_open sau 10 lan thu")
+        self.log.warning("[SNIPE] Khong lay duoc open price %s sau 10 lan thu", symbol)
         return None
 
-    def get_btc_tick_binance(self) -> Optional[float]:
-        """Latest tick price — gọi mỗi 200ms trong 10s cuối round."""
+    def get_price_tick_binance(self, symbol: str) -> Optional[float]:
+        """Latest tick price cho symbol bất kỳ."""
         try:
             r = requests.get(
                 "https://fapi.binance.com/fapi/v1/ticker/price",
-                params={"symbol": "BTCUSDT"},
+                params={"symbol": symbol},
                 timeout=2,
             )
             return float(r.json()["price"])
         except Exception as e:
-            self.log.debug("[SNIPE] get_btc_tick_binance lỗi: %s", e)
+            self.log.debug("[SNIPE] tick %s loi: %s", symbol, e)
             return None
 
+    def get_btc_open_binance(self, round_start_ts: int) -> Optional[float]:
+        return self.get_price_open_binance("BTCUSDT", "5m", round_start_ts, 300)
+
+    def get_btc_tick_binance(self) -> Optional[float]:
+        return self.get_price_tick_binance("BTCUSDT")
+
     def place_buy_limit(self, token_id: str, price: float, size: int) -> dict:
-        """Đặt lệnh LIMIT BUY GTC. Raises nếu API trả lỗi."""
+        """Đặt lệnh LIMIT BUY GTC. Thread-safe qua _order_lock."""
         from py_clob_client_v2.clob_types import OrderArgs, OrderType
 
         order_args = OrderArgs(
@@ -618,5 +622,6 @@ class PolymarketClient:
             size=float(size),
             side="BUY",
         )
-        return self._client.create_and_post_order(order_args, order_type=OrderType.GTC)
+        with self._order_lock:
+            return self._client.create_and_post_order(order_args, order_type=OrderType.GTC)
 

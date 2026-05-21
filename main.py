@@ -1,10 +1,12 @@
-"""Bot snipe Polymarket BTC Up/Down 5m — canh đặt lệnh trong X giây cuối round."""
+"""Bot snipe Polymarket BTC/ETH Up/Down — chạy song song nhiều markets."""
 
 import csv
 import pathlib
 import signal
 import sys
+import threading
 import time
+from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Optional
@@ -12,16 +14,20 @@ from typing import Optional
 import config as cfg_module
 import logger as log_module
 import strategy
+from config import MarketSpec
 from polymarket import PolymarketClient
 
 _running     = True
 _session_pnl = 0.0
+_pnl_lock    = threading.Lock()
 
-_trade_stats = {"placed": 0, "filled": 0, "unfilled": 0, "win": 0, "lose": 0}
-_rev_stats   = {"win": 0, "lose": 0}
+# Per-market stats (keyed by spec.name, populated in run())
+_trade_stats: dict[str, dict] = {}
+_rev_stats:   dict[str, dict] = {}
 
-REVERSAL_CSV = pathlib.Path("reversals.csv")
-_HIGH_ASK    = Decimal("0.99")
+REVERSAL_CSV  = pathlib.Path("reversals.csv")
+_csv_lock     = threading.Lock()
+_HIGH_ASK     = Decimal("0.99")
 
 
 def _on_signal(sig, frame):
@@ -47,35 +53,65 @@ def run() -> None:
     cfg = cfg_module.load()
     log = log_module.setup()
 
+    if not cfg.markets:
+        log.error("Khong co market nao duoc cau hinh trong MARKETS= (.env)")
+        sys.exit(1)
+
     log.info("=" * 60)
-    log.info("  Polymarket BTC Up/Down 5m — SNIPE MODE")
-    log.info("  DRY_RUN       = %s %s", cfg.dry_run,
+    log.info("  Polymarket Snipe Bot — MULTI-MARKET")
+    log.info("  DRY_RUN    = %s %s", cfg.dry_run,
              "(chi log)" if cfg.dry_run else "SE DAT LENH THAT!")
-    log.info("  TARGET_PRICE  = %.2f (nguong ask hop le)", cfg.target_price)
-    log.info("  ORDER_PRICE   = %.2f (gia dat lenh)", cfg.order_price)
-    log.info("  ORDER_SIZE    = %d shares", cfg.order_size)
-    log.info("  SNIPE_SECONDS = %ds cuoi round", cfg.snipe_seconds)
-    log.info("  SNIPE_MIN_DIFF= $%.1f", cfg.snipe_min_diff)
+    log.info("  Markets    = %s", ", ".join(s.name for s in cfg.markets))
+    for spec in cfg.markets:
+        log.info("    [%s] slug=%s | symbol=%s | min_diff=%.1f",
+                 spec.name, spec.slug_prefix, spec.symbol, spec.min_diff)
+    log.info("  ORDER_PRICE= %.2f | ORDER_SIZE= %d | SNIPE_SECONDS= %ds",
+             cfg.order_price, cfg.order_size, cfg.snipe_seconds)
     log.info("=" * 60)
 
     if not cfg.private_key:
         log.error("PRIVATE_KEY chua duoc set trong .env!")
         sys.exit(1)
 
+    # Init per-market stats
+    for spec in cfg.markets:
+        _trade_stats[spec.name] = {"placed": 0, "filled": 0, "unfilled": 0, "win": 0, "lose": 0}
+        _rev_stats[spec.name]   = {"win": 0, "lose": 0}
+
     pm = PolymarketClient(cfg, log)
 
-    while _running:
-        _run_one_round(pm, cfg, log)
+    threads = []
+    for spec in cfg.markets:
+        t = threading.Thread(
+            target=_market_loop,
+            args=(spec, pm, cfg, log),
+            name=spec.name,
+            daemon=True,
+        )
+        t.start()
+        threads.append(t)
+        log.info("[START] Thread: %s", spec.name)
+
+    for t in threads:
+        t.join()
 
     log.info("Bot da dung.")
 
 
-def _run_one_round(pm: PolymarketClient, cfg, log) -> None:
+def _market_loop(spec: MarketSpec, pm: PolymarketClient, cfg, log) -> None:
+    while _running:
+        _run_one_round(spec, pm, cfg, log)
+    log.info("[%s] Da dung.", spec.name)
+
+
+def _run_one_round(spec: MarketSpec, pm: PolymarketClient, cfg, log) -> None:
+    tag = spec.name
+
     # ── 1. Tìm market ─────────────────────────────────────────────────────────
-    log.info("[ROUND] Tim market BTC Up/Down 5m...")
-    market = _retry_find_market(pm, log)
+    log.info("[%s] Tim market...", tag)
+    market = _retry_find_market(spec, pm, log)
     if market is None:
-        log.error("[ROUND] Khong tim duoc market. Nghi 60s.")
+        log.error("[%s] Khong tim duoc market. Nghi 60s.", tag)
         time.sleep(60)
         return
 
@@ -83,92 +119,99 @@ def _run_one_round(pm: PolymarketClient, cfg, log) -> None:
                    or market.get("event_title") or market.get("title") or "(unknown)")
     end_time    = pm.get_end_time(market)
     tokens      = pm.get_tokens(market)
-    market_slug = f"btc-updown-5m-{int(end_time.timestamp()) - 300}" if end_time else None
+    market_slug = (f"{spec.slug_prefix}-{int(end_time.timestamp()) - spec.interval_secs}"
+                   if end_time else None)
 
     balance: Optional[float] = None
     try:
         balance = pm.get_usdc_balance()
-        log.info("[BALANCE] USDC: $%.2f", balance)
+        log.info("[%s][BALANCE] USDC: $%.2f", tag, balance)
     except Exception as e:
-        log.debug("[BALANCE] Loi: %s", e)
+        log.debug("[%s][BALANCE] Loi: %s", tag, e)
 
-    log.info("[ROUND] %s", question)
-    log.info("[ROUND] Ket thuc: %s", end_time.strftime("%H:%M:%S UTC") if end_time else "?")
+    log.info("[%s] %s", tag, question)
+    log.info("[%s] Ket thuc: %s", tag,
+             end_time.strftime("%H:%M:%S UTC") if end_time else "?")
 
     if not tokens:
-        log.error("[ROUND] Khong lay duoc token IDs — bo qua, doi 10s")
+        log.error("[%s] Khong lay duoc token IDs — bo qua, doi 10s", tag)
         time.sleep(10)
         return
 
-    # ── 2. Init orderbook + fetch BTC open ────────────────────────────────────
+    # ── 2. Init orderbook + fetch price open ──────────────────────────────────
     pm.init_orderbooks(list(tokens.values()))
 
-    btc_open: Optional[float] = None
+    price_open: Optional[float] = None
     if end_time:
-        round_start_ts = int(end_time.timestamp()) - 300
-        btc_open = pm.get_btc_open_binance(round_start_ts)
-        log.info("[SNIPE] BTC open (Binance 5m) = %s", btc_open)
+        round_start_ts = int(end_time.timestamp()) - spec.interval_secs
+        price_open = pm.get_price_open_binance(
+            spec.symbol, spec.interval, round_start_ts, spec.interval_secs
+        )
+        log.info("[%s] Open (%s %s) = %s", tag, spec.symbol, spec.interval, price_open)
+
+    # Dùng effective_cfg với min_diff của market này
+    effective_cfg = replace(cfg, snipe_min_diff=spec.min_diff)
 
     # ── 3. Vòng lặp check ─────────────────────────────────────────────────────
     traded_this_round               = False
-    traded_side: str                = ""
     _pending_result: Optional[dict] = None
-    btc_current: Optional[float]    = None
+    price_current: Optional[float]  = None
     last_ob_fetch                   = 0.0
+    last_status_log                 = 0.0
     last_high_ask_obs: dict[str, Optional[Decimal]] = {}
 
     while _running:
         now = datetime.now(timezone.utc)
 
         if end_time and now >= end_time:
-            sys.stdout.write("\n")
-            sys.stdout.flush()
-            log.info("[ROUND] Round ket thuc.")
+            log.info("[%s] Round ket thuc.", tag)
             break
 
         if traded_this_round:
             time.sleep(1)
             continue
 
-        # Fetch OB: 10s cuoi moi 200ms, ngoai 10s moi 5s (tu dau round)
+        # Fetch OB: 10s cuoi moi 200ms, ngoai 10s moi 2s
         if end_time:
             secs_now = (end_time - now).total_seconds()
             now_ts   = time.time()
             if 0 < secs_now <= 10:
                 for tid in tokens.values():
                     pm.fetch_orderbook_rest(tid)
-                btc_current = pm.get_btc_tick_binance()
-                if btc_current and btc_open:
-                    log.debug("[SNIPE] open=%.2f cur=%.2f diff=%+.2f",
-                              btc_open, btc_current, btc_current - btc_open)
+                price_current = pm.get_price_tick_binance(spec.symbol)
+                if price_current and price_open:
+                    log.debug("[%s] open=%.2f cur=%.2f diff=%+.2f",
+                              tag, price_open, price_current, price_current - price_open)
             elif secs_now > 0 and now_ts - last_ob_fetch >= 2.0:
                 for tid in tokens.values():
                     pm.fetch_orderbook_rest(tid)
                 last_ob_fetch = now_ts
-                btc_current   = None
+                price_current = None
             else:
-                btc_current = None
+                price_current = None
 
         # Check điều kiện từng side
         side_results: dict[str, strategy.CheckResult] = {}
         for side, token_id in tokens.items():
             ob = pm.get_orderbook_snapshot(token_id)
             side_results[side] = strategy.check_snipe(
-                side, ob, end_time, btc_current, btc_open, cfg
+                side, ob, end_time, price_current, price_open, effective_cfg
             )
 
-        # Terminal status
+        # Log status moi 5s (thay cho \r de tranh xung dot giua cac thread)
         secs_left = (end_time - now).total_seconds() if end_time else 0
-        diff_str  = f"{btc_current - btc_open:+.1f}" if (btc_current and btc_open) else "waiting"
-        side_parts = []
-        for side, result in side_results.items():
-            ask_str = str(result.best_ask) if result.best_ask else "--"
-            flag    = " *** ENTER" if result.should_enter else ""
-            side_parts.append(f"[{side:>4}] ask={ask_str:<5}{flag}")
-        sys.stdout.write(
-            f"\r[SNIPE] con={secs_left:.0f}s | diff={diff_str} | {'  |  '.join(side_parts)}    "
-        )
-        sys.stdout.flush()
+        now_ts2   = time.time()
+        if now_ts2 - last_status_log >= 5.0:
+            diff_str   = (f"{price_current - price_open:+.1f}"
+                          if (price_current and price_open) else "waiting")
+            side_parts = []
+            for side, res in side_results.items():
+                ask_str = str(res.best_ask) if res.best_ask else "--"
+                flag    = " ENTER" if res.should_enter else ""
+                side_parts.append(f"[{side}] ask={ask_str}{flag}")
+            log.info("[%s] con=%.0fs | diff=%s | %s",
+                     tag, secs_left, diff_str, " | ".join(side_parts))
+            last_status_log = now_ts2
 
         # Cap nhat high-ask observation cho reversal tracking
         for side, res in side_results.items():
@@ -179,41 +222,38 @@ def _run_one_round(pm: PolymarketClient, cfg, log) -> None:
 
         # Đặt lệnh nếu đủ điều kiện
         for side, token_id in tokens.items():
-            result = side_results[side]
-            if not result.should_enter:
+            res = side_results[side]
+            if not res.should_enter:
                 continue
-
-            sys.stdout.write("\n")
-            sys.stdout.flush()
 
             min_cost = cfg.order_size * cfg.order_price
             if not cfg.dry_run and (balance is None or balance < min_cost):
-                log.error("[ORDER] Balance $%.2f < chi phi $%.2f — bo qua!", balance or 0.0, min_cost)
+                log.error("[%s] Balance $%.2f < chi phi $%.2f — bo qua!",
+                          tag, balance or 0.0, min_cost)
                 break
 
             if cfg.dry_run:
-                log.info("[DRY RUN] BUY %d shares @ %.2f | %s | token=%s...",
-                         cfg.order_size, cfg.order_price, side, token_id[:14])
+                log.info("[%s][DRY RUN] BUY %d @ %.2f | %s | token=%s...",
+                         tag, cfg.order_size, cfg.order_price, side, token_id[:14])
             else:
-                log.info("[ORDER] BUY %d shares @ %.2f | %s",
-                         cfg.order_size, cfg.order_price, side)
-                order_id = _place_order_safe(pm, token_id, cfg, log)
+                log.info("[%s][ORDER] BUY %d @ %.2f | %s",
+                         tag, cfg.order_size, cfg.order_price, side)
+                order_id = _place_order_safe(spec, pm, token_id, cfg, log)
                 if order_id:
                     _pending_result = {
                         "token_id": token_id, "side": side,
                         "slug": market_slug, "order_id": order_id,
                     }
-                    _trade_stats["placed"] += 1
+                    _trade_stats[tag]["placed"] += 1
 
             traded_this_round = True
-            traded_side = side
             break
 
         time.sleep(0.2)
 
     # ── 4. Sau round: kiểm tra kết quả ────────────────────────────────────────
     if _pending_result:
-        log.info("[RESULT] Doi 60s de Polymarket resolve...")
+        log.info("[%s] Doi 60s de Polymarket resolve...", tag)
         time.sleep(60)
 
         order_id    = _pending_result.get("order_id", "")
@@ -222,18 +262,18 @@ def _run_one_round(pm: PolymarketClient, cfg, log) -> None:
             filled = pm.get_order_filled(order_id)
             if filled is not None:
                 filled_size = filled
-                log.info("[RESULT] Fill: %.0f / %d shares", filled_size, cfg.order_size)
+                log.info("[%s] Fill: %.0f / %d shares", tag, filled_size, cfg.order_size)
             else:
-                log.warning("[RESULT] Khong query duoc fill status")
+                log.warning("[%s] Khong query duoc fill status", tag)
         else:
-            log.warning("[RESULT] Khong co order_id — bo qua P&L")
+            log.warning("[%s] Khong co order_id — bo qua P&L", tag)
 
         if filled_size == 0.0 and order_id:
-            log.info("[RESULT] Chua fill — huy order")
+            log.info("[%s] Chua fill — huy order", tag)
             pm.cancel_order(order_id)
-            _trade_stats["unfilled"] += 1
+            _trade_stats[tag]["unfilled"] += 1
         else:
-            _trade_stats["filled"] += 1
+            _trade_stats[tag]["filled"] += 1
             actual_size = int(filled_size) if filled_size > 0 else cfg.order_size
             result = pm.check_round_result(
                 _pending_result["token_id"],
@@ -241,31 +281,32 @@ def _run_one_round(pm: PolymarketClient, cfg, log) -> None:
                 _pending_result.get("slug") or "",
             )
             if result:
-                log.info("[RESULT] %s (side=%s, fill=%.0f)",
-                         result, _pending_result["side"], filled_size)
+                log.info("[%s] %s (side=%s, fill=%.0f)",
+                         tag, result, _pending_result["side"], filled_size)
                 if result == "WIN":
-                    _trade_stats["win"] += 1
+                    _trade_stats[tag]["win"] += 1
                 elif result == "LOSE":
-                    _trade_stats["lose"] += 1
+                    _trade_stats[tag]["lose"] += 1
                 _update_pnl(result, actual_size, cfg, log)
             else:
-                log.info("[RESULT] Chua xac dinh duoc ket qua")
+                log.info("[%s] Chua xac dinh duoc ket qua", tag)
 
-        log.info("[STATS] Lenh: %d dat | %d khop | %d ko khop | W/L: %d/%d",
-                 _trade_stats["placed"], _trade_stats["filled"],
-                 _trade_stats["unfilled"], _trade_stats["win"], _trade_stats["lose"])
+        ts = _trade_stats[tag]
+        log.info("[%s][STATS] %d dat | %d khop | %d ko khop | W/L: %d/%d",
+                 tag, ts["placed"], ts["filled"], ts["unfilled"], ts["win"], ts["lose"])
 
-    # Reversal tracking (chay moi round co high-ask obs)
+    # Reversal tracking
     if last_high_ask_obs:
         if not _pending_result:
-            log.info("[TRACK] Doi 30s de Polymarket resolve...")
+            log.info("[%s] Doi 30s de Polymarket resolve...", tag)
             time.sleep(30)
-        _check_reversal(pm, tokens, last_high_ask_obs, market_slug, end_time, log)
+        _check_reversal(spec, pm, tokens, last_high_ask_obs, market_slug, end_time, log)
 
     time.sleep(3)
 
 
-def _check_reversal(pm, tokens, obs, slug, round_end, log) -> None:
+def _check_reversal(spec: MarketSpec, pm, tokens, obs, slug, round_end, log) -> None:
+    tag = spec.name
     results: dict[str, Optional[str]] = {}
     for side, ask_val in obs.items():
         token_id = tokens.get(side)
@@ -279,60 +320,68 @@ def _check_reversal(pm, tokens, obs, slug, round_end, log) -> None:
         ask_str = str(ask_val) if ask_val is not None else "N/A"
         is_rev  = result == "LOSE"
         if result == "WIN":
-            _rev_stats["win"] += 1
+            _rev_stats[tag]["win"] += 1
         elif result == "LOSE":
-            _rev_stats["lose"] += 1
-        log.info("[TRACK] %s ask=%s -> %s%s",
-                 side, ask_str, result or "?",
+            _rev_stats[tag]["lose"] += 1
+        log.info("[%s][TRACK] %s ask=%s -> %s%s",
+                 tag, side, ask_str, result or "?",
                  "  *** DAO CHIEU!" if is_rev else "")
 
-    log.info("[TRACK] W/L: %d/%d (dao chieu: %d)",
-             _rev_stats["win"], _rev_stats["lose"], _rev_stats["lose"])
+    rs = _rev_stats[tag]
+    log.info("[%s][TRACK] W/L: %d/%d (dao chieu: %d)",
+             tag, rs["win"], rs["lose"], rs["lose"])
 
-    _save_reversal_csv(obs, results, slug, round_end, log)
+    _save_reversal_csv(spec, obs, results, slug, round_end, log)
 
 
-def _save_reversal_csv(obs, results, slug, round_end, log) -> None:
+def _save_reversal_csv(spec: MarketSpec, obs, results, slug, round_end, log) -> None:
     exists = REVERSAL_CSV.exists()
     try:
-        with open(REVERSAL_CSV, "a", newline="", encoding="utf-8") as f:
-            w = csv.writer(f)
-            if not exists:
-                w.writerow(["round_end_utc", "slug", "side", "ask", "result", "is_reversal"])
-            for side, ask_val in obs.items():
-                result = results.get(side)
-                w.writerow([
-                    round_end.strftime("%Y-%m-%d %H:%M:%S") if round_end else "",
-                    slug or "",
-                    side,
-                    str(ask_val) if ask_val is not None else "N/A",
-                    result or "?",
-                    "YES" if result == "LOSE" else "NO",
-                ])
+        with _csv_lock:
+            with open(REVERSAL_CSV, "a", newline="", encoding="utf-8") as f:
+                w = csv.writer(f)
+                if not exists:
+                    w.writerow(["round_end_utc", "market", "slug", "side",
+                                "ask", "result", "is_reversal"])
+                for side, ask_val in obs.items():
+                    result = results.get(side)
+                    w.writerow([
+                        round_end.strftime("%Y-%m-%d %H:%M:%S") if round_end else "",
+                        spec.name,
+                        slug or "",
+                        side,
+                        str(ask_val) if ask_val is not None else "N/A",
+                        result or "?",
+                        "YES" if result == "LOSE" else "NO",
+                    ])
     except Exception as e:
-        log.debug("[TRACK] Loi ghi CSV: %s", e)
+        log.debug("[%s][TRACK] Loi ghi CSV: %s", spec.name, e)
 
 
-def _place_order_safe(pm: PolymarketClient, token_id: str, cfg, log) -> Optional[str]:
+def _place_order_safe(spec: MarketSpec, pm: PolymarketClient,
+                      token_id: str, cfg, log) -> Optional[str]:
+    tag = spec.name
     for attempt in range(1, 3):
         try:
             resp     = pm.place_buy_limit(token_id, cfg.order_price, cfg.order_size)
             order_id = resp.get("orderID") or resp.get("order_id") or resp.get("id") or ""
-            log.info("[ORDER] OK attempt=%d order_id=%s", attempt, order_id[:12] if order_id else "?")
+            log.info("[%s][ORDER] OK attempt=%d order_id=%s",
+                     tag, attempt, order_id[:12] if order_id else "?")
             return order_id or "unknown"
         except Exception as exc:
-            log.error("[ORDER] Fail attempt=%d: %s", attempt, exc)
+            log.error("[%s][ORDER] Fail attempt=%d: %s", tag, attempt, exc)
             if attempt < 2:
                 time.sleep(0.1)
     return None
 
 
-def _retry_find_market(pm: PolymarketClient, log) -> dict | None:
+def _retry_find_market(spec: MarketSpec, pm: PolymarketClient, log) -> dict | None:
+    tag = spec.name
     for i in range(1, 11):
-        market = pm.find_btc_5m_market()
+        market = pm.find_market(spec.slug_prefix, spec.interval_secs)
         if market:
             return market
-        log.warning("[MARKET] Khong tim thay (lan %d/10), thu lai sau 15s...", i)
+        log.warning("[%s] Khong tim thay (lan %d/10), thu lai sau 15s...", tag, i)
         time.sleep(15)
     return None
 
@@ -345,10 +394,12 @@ def _update_pnl(result: str, size: int, cfg, log) -> None:
         pnl = -(size * cfg.order_price)
     else:
         return
-    _session_pnl += pnl
+    with _pnl_lock:
+        _session_pnl += pnl
+        session = _session_pnl
     sign = "+" if pnl >= 0 else ""
     log.info("[PNL] Phien: %s$%.2f  (vua: %s$%.2f)",
-             "+" if _session_pnl >= 0 else "", _session_pnl, sign, pnl)
+             "+" if session >= 0 else "", session, sign, pnl)
     _check_profit_limit(cfg, log)
 
 
