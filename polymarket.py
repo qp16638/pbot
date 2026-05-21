@@ -493,14 +493,16 @@ class PolymarketClient:
             self.log.debug("[ORDER] cancel_order lỗi: %s", e)
             return False
 
-    def redeem_position(self, token_id: str) -> bool:
+    def redeem_position(self, token_id: str, condition_id: str = "") -> bool:
         """
         Redeem winning CTF position on-chain qua Polygon RPC.
+        condition_id: hex string từ Gamma API (ưu tiên dùng nếu có).
         Tự động dùng POLY_PROXY execute nếu funder được set.
         """
         _RPC         = "https://polygon-rpc.com"
         _EXCHANGE_V1 = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
         _CTF         = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
+        _USDC        = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
 
         def _rpc(method, params):
             r = self._session.post(_RPC, json={
@@ -518,20 +520,26 @@ class PolymarketClient:
             from eth_account import Account
             from eth_utils import keccak
 
-            # ── 1. Lấy conditionId từ Exchange V1 ────────────────────────────
-            sel_cid = keccak(text="getConditionId(uint256)")[:4]
-            raw_cid = _eth_call(_EXCHANGE_V1, sel_cid + _enc(["uint256"], [int(token_id)]))
-            cid     = raw_cid[:32] if len(raw_cid) >= 32 else b'\x00' * 32
-            if cid == b'\x00' * 32:
-                self.log.error("[REDEEM] conditionId = 0 — token chưa register hoặc sai exchange")
-                return False
-            self.log.info("[REDEEM] conditionId = 0x%s", cid.hex())
+            # ── 1. Lấy conditionId ─────────────────────────────────────────────
+            if condition_id:
+                # Dùng conditionId từ Gamma API (đáng tin cậy hơn)
+                hex_str = condition_id.replace("0x", "").zfill(64)
+                cid     = bytes.fromhex(hex_str)[:32]
+                self.log.info("[REDEEM] conditionId (Gamma) = 0x%s", cid.hex())
+            else:
+                # Fallback: query Exchange V1 contract
+                sel_cid = keccak(text="getConditionId(uint256)")[:4]
+                raw_cid = _eth_call(_EXCHANGE_V1, sel_cid + _enc(["uint256"], [int(token_id)]))
+                cid     = raw_cid[:32] if len(raw_cid) >= 32 else b'\x00' * 32
+                if cid == b'\x00' * 32:
+                    self.log.error("[REDEEM] conditionId = 0 — token chưa register hoặc sai exchange")
+                    return False
+                self.log.info("[REDEEM] conditionId (chain) = 0x%s", cid.hex())
 
             # ── 2. Lấy collateral token từ Exchange V1 ────────────────────────
             sel_col    = keccak(text="getCollateral()")[:4]
             raw_col    = _eth_call(_EXCHANGE_V1, sel_col)
-            collateral = "0x" + raw_col[-20:].hex() if len(raw_col) >= 20 else \
-                         "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+            collateral = "0x" + raw_col[-20:].hex() if len(raw_col) >= 20 else _USDC
 
             # ── 3. Encode redeemPositions calldata ────────────────────────────
             sel_rdm  = keccak(text="redeemPositions(address,bytes32,bytes32,uint256[])")[:4]

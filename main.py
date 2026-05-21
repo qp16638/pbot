@@ -117,12 +117,13 @@ def _run_one_round(spec: MarketSpec, pm: PolymarketClient, cfg, log) -> None:
         time.sleep(60)
         return
 
-    question    = (market.get("question") or market.get("event_question")
-                   or market.get("event_title") or market.get("title") or "(unknown)")
-    end_time    = pm.get_end_time(market)
-    tokens      = pm.get_tokens(market)
-    market_slug = (f"{spec.slug_prefix}-{int(end_time.timestamp()) - spec.interval_secs}"
-                   if end_time else None)
+    question     = (market.get("question") or market.get("event_question")
+                    or market.get("event_title") or market.get("title") or "(unknown)")
+    end_time     = pm.get_end_time(market)
+    tokens       = pm.get_tokens(market)
+    condition_id = market.get("conditionId") or market.get("condition_id") or ""
+    market_slug  = (f"{spec.slug_prefix}-{int(end_time.timestamp()) - spec.interval_secs}"
+                    if end_time else None)
 
     balance: Optional[float] = None
     try:
@@ -263,6 +264,7 @@ def _run_one_round(spec: MarketSpec, pm: PolymarketClient, cfg, log) -> None:
                     _pending_result = {
                         "token_id": token_id, "side": side,
                         "slug": market_slug, "order_id": order_id,
+                        "condition_id": condition_id,
                     }
                     _trade_stats[tag]["placed"] += 1
                     dashboard.record_trade(tag, side, spec.order_size, cfg.order_price)
@@ -311,7 +313,8 @@ def _run_one_round(spec: MarketSpec, pm: PolymarketClient, cfg, log) -> None:
                 _update_pnl(result, actual_size, cfg, log)
                 dashboard.update_trade_result(tag, result)
                 if result == "WIN" and not cfg.dry_run:
-                    _do_redeem(tag, _pending_result["token_id"], pm, log)
+                    _do_redeem(tag, _pending_result["token_id"],
+                               _pending_result.get("condition_id", ""), pm, log)
             else:
                 log.info("[%s] Chua xac dinh duoc ket qua", tag)
 
@@ -410,13 +413,14 @@ def _retry_find_market(spec: MarketSpec, pm: PolymarketClient, log) -> dict | No
     return None
 
 
-def _do_redeem(tag: str, token_id: str, pm: PolymarketClient, log) -> None:
+def _do_redeem(tag: str, token_id: str, condition_id: str,
+               pm: PolymarketClient, log) -> None:
     """Retry redeem tối đa 4 lần, mỗi lần cách nhau 60s.
     Polymarket cần ~2-3 phút settle on-chain sau khi round kết thúc.
     """
     for attempt in range(1, 5):
         log.info("[%s] Redeem win token %s... (lan %d/4)", tag, token_id[:14], attempt)
-        ok = pm.redeem_position(token_id)
+        ok = pm.redeem_position(token_id, condition_id)
         if ok:
             log.info("[%s] Redeem thanh cong.", tag)
             try:
