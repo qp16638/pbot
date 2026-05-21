@@ -560,9 +560,17 @@ class PolymarketClient:
                 self.log.info("[REDEEM] Gọi trực tiếp từ EOA")
 
             # ── 5. Lấy nonce + gas price ──────────────────────────────────────
-            nonce   = int(_rpc("eth_getTransactionCount",
-                               [self._eoa_address, "pending"])["result"], 16)
-            gprice  = int(int(_rpc("eth_gasPrice", [])["result"], 16) * 1.5)
+            nonce_resp = _rpc("eth_getTransactionCount", [self._eoa_address, "pending"])
+            if "result" not in nonce_resp:
+                self.log.error("[REDEEM] Loi lay nonce: %s", nonce_resp.get("error", nonce_resp))
+                return False
+            nonce = int(nonce_resp["result"], 16)
+
+            gprice_resp = _rpc("eth_gasPrice", [])
+            if "result" not in gprice_resp:
+                self.log.error("[REDEEM] Loi lay gasPrice: %s", gprice_resp.get("error", gprice_resp))
+                return False
+            gprice = int(int(gprice_resp["result"], 16) * 1.5)
 
             tx = {
                 "to":       tx_to,
