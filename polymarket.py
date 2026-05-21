@@ -13,11 +13,17 @@ from decimal import Decimal
 from typing import Optional
 
 import requests
+from requests.adapters import HTTPAdapter
 
 CLOB_HOST    = "https://clob.polymarket.com"
 GAMMA_HOST   = "https://gamma-api.polymarket.com"
 CHAIN_ID     = 137
 REST_TIMEOUT = 6
+
+# Cache Binance tick theo symbol — share giữa các thread cùng symbol
+_binance_tick_cache: dict[str, tuple[float, float]] = {}  # symbol -> (price, ts)
+_BINANCE_TICK_TTL = 0.15  # 150ms
+_binance_cache_lock = threading.Lock()
 MAX_RETRIES  = 3
 
 
@@ -101,7 +107,14 @@ class PolymarketClient:
         self._orderbooks: dict[str, OrderbookState] = {}
         self._client = None
         self._eoa_address: str = ""
-        self._order_lock = threading.Lock()
+        self._order_lock   = threading.Lock()
+        self._balance_lock = threading.Lock()
+        self._balance_cache: tuple[float, float] | None = None  # (usdc, timestamp)
+
+        # Persistent HTTP session — tái sử dụng TCP connection
+        self._session = requests.Session()
+        _adapter = HTTPAdapter(pool_connections=10, pool_maxsize=20, max_retries=0)
+        self._session.mount("https://", _adapter)
 
         self._setup_clob_client()
 
@@ -204,7 +217,7 @@ class PolymarketClient:
     def _fetch_market_by_event_slug(self, slug: str) -> Optional[dict]:
         """Fetch markets[0] từ Gamma /events?slug=..., đính kèm event-level title/description."""
         try:
-            resp = requests.get(
+            resp = self._session.get(
                 f"{GAMMA_HOST}/events",
                 params={"slug": slug},
                 timeout=REST_TIMEOUT,
@@ -297,7 +310,7 @@ class PolymarketClient:
         """Fetch orderbook qua REST. Returns True nếu thành công."""
         for attempt in range(MAX_RETRIES):
             try:
-                resp = requests.get(
+                resp = self._session.get(
                     f"{CLOB_HOST}/book",
                     params={"token_id": token_id},
                     timeout=REST_TIMEOUT,
@@ -325,18 +338,24 @@ class PolymarketClient:
     # ── Order placement ────────────────────────────────────────────────────────
 
     def get_usdc_balance(self) -> float:
-        """Lấy USDC balance từ Polymarket CLOB API (số dư thật trong exchange)."""
+        """Lấy USDC balance từ Polymarket CLOB API. Cache 5 phút."""
+        now = time.time()
+        with self._balance_lock:
+            if self._balance_cache and now - self._balance_cache[1] < 300.0:
+                return self._balance_cache[0]
         try:
             from py_clob_client_v2.clob_types import BalanceAllowanceParams, AssetType
             resp = self._client.get_balance_allowance(
                 BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
             )
-            self.log.info("[BALANCE] raw CLOB response: %s", resp)
+            self.log.debug("[BALANCE] raw CLOB response: %s", resp)
             raw = resp.get("balance") or "0"
             usdc = int(raw) / 1e6
             if usdc == 0.0:
                 self._log_onchain_usdc()
                 self._find_real_proxy()
+            with self._balance_lock:
+                self._balance_cache = (usdc, time.time())
             return usdc
         except Exception as e:
             self.log.warning("[BALANCE] CLOB balance lỗi: %s", e)
@@ -353,7 +372,7 @@ class PolymarketClient:
             sel  = keccak(text="getPolyProxyWalletAddress(address)")[:4]
             padded = self._eoa_address[2:].lower().zfill(64)
             data = "0x" + sel.hex() + padded
-            r = requests.post(_RPC, json={
+            r = self._session.post(_RPC, json={
                 "jsonrpc": "2.0", "method": "eth_call",
                 "params": [{"to": _EX1, "data": data}, "latest"], "id": 1,
             }, timeout=6)
@@ -403,7 +422,7 @@ class PolymarketClient:
             try:
                 padded = addr[2:].lower().zfill(64)
                 data   = "0x" + sel.hex() + padded
-                r = requests.post(_RPC, json={
+                r = self._session.post(_RPC, json={
                     "jsonrpc": "2.0", "method": "eth_call",
                     "params": [{"to": _USDC, "data": data}, "latest"], "id": 1,
                 }, timeout=6)
@@ -418,7 +437,7 @@ class PolymarketClient:
         # BTC/USD feed ID trên Pyth
         FEED_ID = "0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43"
         try:
-            r = requests.get(
+            r = self._session.get(
                 "https://hermes.pyth.network/v2/updates/price/latest",
                 params={"ids[]": FEED_ID},
                 timeout=4,
@@ -432,7 +451,7 @@ class PolymarketClient:
         """Sau khi round kết thúc, trả về 'WIN', 'LOSE', hoặc None (chưa resolve)."""
         # Thử Gamma API trước
         try:
-            resp = requests.get(f"{GAMMA_HOST}/events", params={"slug": slug}, timeout=6)
+            resp = self._session.get(f"{GAMMA_HOST}/events", params={"slug": slug}, timeout=6)
             events = resp.json()
             events = events if isinstance(events, list) else events.get("events", [])
             if events:
@@ -481,7 +500,7 @@ class PolymarketClient:
         _CTF         = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
 
         def _rpc(method, params):
-            r = requests.post(_RPC, json={
+            r = self._session.post(_RPC, json={
                 "jsonrpc": "2.0", "method": method, "params": params, "id": 1,
             }, timeout=15)
             return r.json()
@@ -574,7 +593,7 @@ class PolymarketClient:
         """Candle open price tại đầu round. Generic: hỗ trợ BTCUSDT/ETHUSDT, 5m/15m."""
         for attempt in range(10):
             try:
-                r = requests.get(
+                r = self._session.get(
                     "https://fapi.binance.com/fapi/v1/klines",
                     params={"symbol": symbol, "interval": interval,
                             "startTime": round_start_ts * 1000, "limit": 1},
@@ -594,17 +613,25 @@ class PolymarketClient:
         return None
 
     def get_price_tick_binance(self, symbol: str) -> Optional[float]:
-        """Latest tick price cho symbol bất kỳ."""
+        """Latest tick price cho symbol. Cache 150ms — share giữa các thread cùng symbol."""
+        now = time.time()
+        with _binance_cache_lock:
+            cached = _binance_tick_cache.get(symbol)
+            if cached and now - cached[1] < _BINANCE_TICK_TTL:
+                return cached[0]
         try:
-            r = requests.get(
+            r = self._session.get(
                 "https://fapi.binance.com/fapi/v1/ticker/price",
                 params={"symbol": symbol},
                 timeout=2,
             )
-            return float(r.json()["price"])
+            price = float(r.json()["price"])
+            with _binance_cache_lock:
+                _binance_tick_cache[symbol] = (price, time.time())
+            return price
         except Exception as e:
             self.log.debug("[SNIPE] tick %s loi: %s", symbol, e)
-            return None
+            return cached[0] if cached else None
 
     def get_btc_open_binance(self, round_start_ts: int) -> Optional[float]:
         return self.get_price_open_binance("BTCUSDT", "5m", round_start_ts, 300)
@@ -623,5 +650,8 @@ class PolymarketClient:
             side="BUY",
         )
         with self._order_lock:
-            return self._client.create_and_post_order(order_args, order_type=OrderType.GTC)
+            result = self._client.create_and_post_order(order_args, order_type=OrderType.GTC)
+        with self._balance_lock:
+            self._balance_cache = None  # invalidate sau khi đặt lệnh
+        return result
 

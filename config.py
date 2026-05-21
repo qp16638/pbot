@@ -16,6 +16,7 @@ class MarketSpec:
     interval: str      # "5m"
     interval_secs: int # 300
     min_diff: float    # 7.0
+    order_size: int    # số shares mỗi lệnh (riêng cho market này)
 
 
 @dataclass
@@ -43,10 +44,10 @@ class Config:
 
 
 _ALL_MARKETS = {
-    "BTC_5M":  MarketSpec("BTC-5M",  "btc-updown-5m",  "BTCUSDT", "5m",  300, 0.0),
-    "BTC_15M": MarketSpec("BTC-15M", "btc-updown-15m", "BTCUSDT", "15m", 900, 0.0),
-    "ETH_5M":  MarketSpec("ETH-5M",  "eth-updown-5m",  "ETHUSDT", "5m",  300, 0.0),
-    "ETH_15M": MarketSpec("ETH-15M", "eth-updown-15m", "ETHUSDT", "15m", 900, 0.0),
+    "BTC_5M":  MarketSpec("BTC-5M",  "btc-updown-5m",  "BTCUSDT", "5m",  300, 0.0, 0),
+    "BTC_15M": MarketSpec("BTC-15M", "btc-updown-15m", "BTCUSDT", "15m", 900, 0.0, 0),
+    "ETH_5M":  MarketSpec("ETH-5M",  "eth-updown-5m",  "ETHUSDT", "5m",  300, 0.0, 0),
+    "ETH_15M": MarketSpec("ETH-15M", "eth-updown-15m", "ETHUSDT", "15m", 900, 0.0, 0),
 }
 
 
@@ -60,7 +61,8 @@ def load() -> Config:
         if spec is None:
             continue
         per_market_diff = float(os.getenv(f"{key}_MIN_DIFF", str(snipe_min_diff)))
-        markets.append(replace(spec, min_diff=per_market_diff))
+        per_market_size = int(os.getenv(f"{key}_ORDER_SIZE", str(int(os.getenv("ORDER_SIZE", "5")))))
+        markets.append(replace(spec, min_diff=per_market_diff, order_size=per_market_size))
 
     return Config(
         private_key      = os.getenv("PRIVATE_KEY", ""),

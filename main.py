@@ -63,10 +63,10 @@ def run() -> None:
              "(chi log)" if cfg.dry_run else "SE DAT LENH THAT!")
     log.info("  Markets    = %s", ", ".join(s.name for s in cfg.markets))
     for spec in cfg.markets:
-        log.info("    [%s] slug=%s | symbol=%s | min_diff=%.1f",
-                 spec.name, spec.slug_prefix, spec.symbol, spec.min_diff)
+        log.info("    [%s] slug=%s | symbol=%s | min_diff=%.2f | order_size=%d",
+                 spec.name, spec.slug_prefix, spec.symbol, spec.min_diff, spec.order_size)
     log.info("  ORDER_PRICE= %.2f | ORDER_SIZE= %d | SNIPE_SECONDS= %ds",
-             cfg.order_price, cfg.order_size, cfg.snipe_seconds)
+             cfg.order_price, spec.order_size, cfg.snipe_seconds)
     log.info("=" * 60)
 
     if not cfg.private_key:
@@ -198,10 +198,11 @@ def _run_one_round(spec: MarketSpec, pm: PolymarketClient, cfg, log) -> None:
                 side, ob, end_time, price_current, price_open, effective_cfg
             )
 
-        # Log status moi 5s (thay cho \r de tranh xung dot giua cac thread)
-        secs_left = (end_time - now).total_seconds() if end_time else 0
-        now_ts2   = time.time()
-        if now_ts2 - last_status_log >= 5.0:
+        # Log status: ngoai 10s cuoi moi 60s, trong 10s cuoi moi 2s
+        secs_left    = (end_time - now).total_seconds() if end_time else 0
+        now_ts2      = time.time()
+        status_freq  = 2.0 if secs_left <= 10 else 60.0
+        if now_ts2 - last_status_log >= status_freq:
             diff_str   = (f"{price_current - price_open:+.1f}"
                           if (price_current and price_open) else "waiting")
             side_parts = []
@@ -226,7 +227,7 @@ def _run_one_round(spec: MarketSpec, pm: PolymarketClient, cfg, log) -> None:
             if not res.should_enter:
                 continue
 
-            min_cost = cfg.order_size * cfg.order_price
+            min_cost = spec.order_size * cfg.order_price
             if not cfg.dry_run and (balance is None or balance < min_cost):
                 log.error("[%s] Balance $%.2f < chi phi $%.2f — bo qua!",
                           tag, balance or 0.0, min_cost)
@@ -234,10 +235,10 @@ def _run_one_round(spec: MarketSpec, pm: PolymarketClient, cfg, log) -> None:
 
             if cfg.dry_run:
                 log.info("[%s][DRY RUN] BUY %d @ %.2f | %s | token=%s...",
-                         tag, cfg.order_size, cfg.order_price, side, token_id[:14])
+                         tag, spec.order_size, cfg.order_price, side, token_id[:14])
             else:
                 log.info("[%s][ORDER] BUY %d @ %.2f | %s",
-                         tag, cfg.order_size, cfg.order_price, side)
+                         tag, spec.order_size, cfg.order_price, side)
                 order_id = _place_order_safe(spec, pm, token_id, cfg, log)
                 if order_id:
                     _pending_result = {
@@ -253,8 +254,9 @@ def _run_one_round(spec: MarketSpec, pm: PolymarketClient, cfg, log) -> None:
 
     # ── 4. Sau round: kiểm tra kết quả ────────────────────────────────────────
     if _pending_result:
-        log.info("[%s] Doi 60s de Polymarket resolve...", tag)
-        time.sleep(60)
+        for i in range(60, 0, -10):
+            log.info("[%s] Doi resolve... con %ds", tag, i)
+            time.sleep(10)
 
         order_id    = _pending_result.get("order_id", "")
         filled_size = 0.0
@@ -262,7 +264,7 @@ def _run_one_round(spec: MarketSpec, pm: PolymarketClient, cfg, log) -> None:
             filled = pm.get_order_filled(order_id)
             if filled is not None:
                 filled_size = filled
-                log.info("[%s] Fill: %.0f / %d shares", tag, filled_size, cfg.order_size)
+                log.info("[%s] Fill: %.0f / %d shares", tag, filled_size, spec.order_size)
             else:
                 log.warning("[%s] Khong query duoc fill status", tag)
         else:
@@ -274,7 +276,7 @@ def _run_one_round(spec: MarketSpec, pm: PolymarketClient, cfg, log) -> None:
             _trade_stats[tag]["unfilled"] += 1
         else:
             _trade_stats[tag]["filled"] += 1
-            actual_size = int(filled_size) if filled_size > 0 else cfg.order_size
+            actual_size = int(filled_size) if filled_size > 0 else spec.order_size
             result = pm.check_round_result(
                 _pending_result["token_id"],
                 _pending_result["side"],
@@ -298,8 +300,9 @@ def _run_one_round(spec: MarketSpec, pm: PolymarketClient, cfg, log) -> None:
     # Reversal tracking
     if last_high_ask_obs:
         if not _pending_result:
-            log.info("[%s] Doi 30s de Polymarket resolve...", tag)
-            time.sleep(30)
+            for i in range(30, 0, -10):
+                log.info("[%s] Doi resolve... con %ds", tag, i)
+                time.sleep(10)
         _check_reversal(spec, pm, tokens, last_high_ask_obs, market_slug, end_time, log)
 
     time.sleep(3)
@@ -363,7 +366,7 @@ def _place_order_safe(spec: MarketSpec, pm: PolymarketClient,
     tag = spec.name
     for attempt in range(1, 3):
         try:
-            resp     = pm.place_buy_limit(token_id, cfg.order_price, cfg.order_size)
+            resp     = pm.place_buy_limit(token_id, cfg.order_price, spec.order_size)
             order_id = resp.get("orderID") or resp.get("order_id") or resp.get("id") or ""
             log.info("[%s][ORDER] OK attempt=%d order_id=%s",
                      tag, attempt, order_id[:12] if order_id else "?")
