@@ -12,6 +12,7 @@ from decimal import Decimal
 from typing import Optional
 
 import config as cfg_module
+import dashboard
 import logger as log_module
 import strategy
 from config import MarketSpec
@@ -52,6 +53,7 @@ def _check_profit_limit(cfg, log) -> None:
 def run() -> None:
     cfg = cfg_module.load()
     log = log_module.setup()
+    dashboard.start(cfg.dry_run)
 
     if not cfg.markets:
         log.error("Khong co market nao duoc cau hinh trong MARKETS= (.env)")
@@ -126,6 +128,7 @@ def _run_one_round(spec: MarketSpec, pm: PolymarketClient, cfg, log) -> None:
     try:
         balance = pm.get_usdc_balance()
         log.info("[%s][BALANCE] USDC: $%.2f", tag, balance)
+        dashboard.update_global(balance=balance)
     except Exception as e:
         log.debug("[%s][BALANCE] Loi: %s", tag, e)
 
@@ -213,6 +216,21 @@ def _run_one_round(spec: MarketSpec, pm: PolymarketClient, cfg, log) -> None:
             log.info("[%s] con=%.0fs | diff=%s | %s",
                      tag, secs_left, diff_str, " | ".join(side_parts))
             last_status_log = now_ts2
+            dashboard.update_market(
+                tag,
+                question=question,
+                secs_left=secs_left,
+                price_open=price_open,
+                price_current=price_current,
+                diff=((price_current - price_open) if (price_current and price_open) else None),
+                sides={
+                    s: {"ask": str(r.best_ask) if r.best_ask else None,
+                        "should_enter": r.should_enter}
+                    for s, r in side_results.items()
+                },
+                stats=dict(_trade_stats[tag]),
+                rev=dict(_rev_stats[tag]),
+            )
 
         # Cap nhat high-ask observation cho reversal tracking
         for side, res in side_results.items():
@@ -236,6 +254,7 @@ def _run_one_round(spec: MarketSpec, pm: PolymarketClient, cfg, log) -> None:
             if cfg.dry_run:
                 log.info("[%s][DRY RUN] BUY %d @ %.2f | %s | token=%s...",
                          tag, spec.order_size, cfg.order_price, side, token_id[:14])
+                dashboard.record_trade(tag, side, spec.order_size, cfg.order_price)
             else:
                 log.info("[%s][ORDER] BUY %d @ %.2f | %s",
                          tag, spec.order_size, cfg.order_price, side)
@@ -246,6 +265,7 @@ def _run_one_round(spec: MarketSpec, pm: PolymarketClient, cfg, log) -> None:
                         "slug": market_slug, "order_id": order_id,
                     }
                     _trade_stats[tag]["placed"] += 1
+                    dashboard.record_trade(tag, side, spec.order_size, cfg.order_price)
 
             traded_this_round = True
             break
@@ -254,9 +274,8 @@ def _run_one_round(spec: MarketSpec, pm: PolymarketClient, cfg, log) -> None:
 
     # ── 4. Sau round: kiểm tra kết quả ────────────────────────────────────────
     if _pending_result:
-        for i in range(60, 0, -10):
-            log.info("[%s] Doi resolve... con %ds", tag, i)
-            time.sleep(10)
+        log.info("[%s] Doi resolve... 60s", tag)
+        time.sleep(60)
 
         order_id    = _pending_result.get("order_id", "")
         filled_size = 0.0
@@ -290,6 +309,7 @@ def _run_one_round(spec: MarketSpec, pm: PolymarketClient, cfg, log) -> None:
                 elif result == "LOSE":
                     _trade_stats[tag]["lose"] += 1
                 _update_pnl(result, actual_size, cfg, log)
+                dashboard.update_trade_result(tag, result)
             else:
                 log.info("[%s] Chua xac dinh duoc ket qua", tag)
 
@@ -300,9 +320,8 @@ def _run_one_round(spec: MarketSpec, pm: PolymarketClient, cfg, log) -> None:
     # Reversal tracking
     if last_high_ask_obs:
         if not _pending_result:
-            for i in range(30, 0, -10):
-                log.info("[%s] Doi resolve... con %ds", tag, i)
-                time.sleep(10)
+            log.info("[%s] Doi resolve... 30s", tag)
+            time.sleep(30)
         _check_reversal(spec, pm, tokens, last_high_ask_obs, market_slug, end_time, log)
 
     time.sleep(3)
