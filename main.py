@@ -67,8 +67,8 @@ def run() -> None:
     for spec in cfg.markets:
         log.info("    [%s] slug=%s | symbol=%s | min_diff=%.2f | order_size=%d",
                  spec.name, spec.slug_prefix, spec.symbol, spec.min_diff, spec.order_size)
-    log.info("  ORDER_PRICE= %.2f | ORDER_SIZE= %d | SNIPE_SECONDS= %ds",
-             cfg.order_price, spec.order_size, cfg.snipe_seconds)
+    log.info("  ORDER_PRICE= %.2f | SNIPE_SECONDS= %ds",
+             cfg.order_price, cfg.snipe_seconds)
     log.info("=" * 60)
 
     if not cfg.private_key:
@@ -330,8 +330,8 @@ def _run_one_round(spec: MarketSpec, pm: PolymarketClient, cfg, log) -> None:
         log.info("[%s][STATS] %d dat | %d khop | %d ko khop | W/L: %d/%d",
                  tag, ts["placed"], ts["filled"], ts["unfilled"], ts["win"], ts["lose"])
 
-    # Reversal tracking
-    if last_high_ask_obs:
+    # Reversal tracking — chỉ BTC-5M
+    if last_high_ask_obs and spec.name == "BTC-5M":
         if not _pending_result:
             log.info("[%s] Doi resolve... 30s", tag)
             time.sleep(30)

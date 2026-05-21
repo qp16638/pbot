@@ -473,13 +473,16 @@ class PolymarketClient:
         return None
 
     def get_order_filled(self, order_id: str) -> Optional[float]:
-        """Trả về số shares đã fill. None nếu lỗi."""
-        try:
-            order = self._client.get_order(order_id)
-            return float(order.get("size_matched") or order.get("matched_amount") or 0)
-        except Exception as e:
-            self.log.debug("[ORDER] get_order_filled lỗi: %s", e)
-            return None
+        """Trả về số shares đã fill. Retry 1 lần sau 5s nếu lỗi."""
+        for attempt in range(2):
+            try:
+                order = self._client.get_order(order_id)
+                return float(order.get("size_matched") or order.get("matched_amount") or 0)
+            except Exception as e:
+                self.log.debug("[ORDER] get_order_filled attempt %d lỗi: %s", attempt + 1, e)
+                if attempt == 0:
+                    time.sleep(5)
+        return None
 
     def cancel_order(self, order_id: str) -> bool:
         """Hủy order. Trả về True nếu thành công."""
