@@ -416,8 +416,10 @@ def _retry_find_market(spec: MarketSpec, pm: PolymarketClient, log) -> dict | No
 def _do_redeem(tag: str, token_id: str, condition_id: str,
                pm: PolymarketClient, log) -> None:
     """Retry redeem tối đa 4 lần, mỗi lần cách nhau 60s.
-    Polymarket cần ~2-3 phút settle on-chain sau khi round kết thúc.
+    Đợi thêm 120s trước lần đầu (tổng 180s từ round end, kể từ sau 60s resolve).
     """
+    log.info("[%s] Redeem: doi them 120s cho on-chain settle...", tag)
+    time.sleep(120)
     for attempt in range(1, 5):
         log.info("[%s] Redeem win token %s... (lan %d/4)", tag, token_id[:14], attempt)
         ok = pm.redeem_position(token_id, condition_id)
