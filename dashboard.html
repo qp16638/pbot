@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Polymarket Bot</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0f1117;color:#e2e8f0;font-family:'Segoe UI',monospace;font-size:14px;display:flex;flex-direction:column;min-height:100vh}
+
+/* Header */
+.header{background:#1a1d27;padding:11px 20px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #2d3148;flex-shrink:0}
+.header h1{font-size:16px;font-weight:600;color:#f8f9fa}
+.badge{padding:4px 12px;border-radius:4px;font-size:12px;font-weight:700;letter-spacing:.5px}
+.badge-dry{background:#1e4620;color:#4caf50}
+.badge-live{background:#4a1212;color:#f44336;animation:pulse 1.5s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.6}}
+
+/* Traded side banner */
+.traded-banner{display:none;padding:6px 20px;font-size:13px;font-weight:700;letter-spacing:.5px;text-align:center;flex-shrink:0}
+.traded-up{background:#14532d;color:#4ade80;display:block}
+.traded-down{background:#450a0a;color:#f87171;display:block}
+
+/* Price comparison bar — Polymarket style */
+.top-bar{background:#161921;border-bottom:1px solid #2d3148;flex-shrink:0;display:flex;flex-direction:column}
+.price-row{display:flex;align-items:stretch}
+.price-panel{flex:1;padding:14px 24px;display:flex;flex-direction:column;gap:4px}
+.price-panel+.price-panel{border-left:1px solid #2d3148}
+.price-panel-label{font-size:12px;color:#64748b;display:flex;align-items:center;gap:8px}
+.price-big{font-size:30px;font-weight:700;font-family:monospace;letter-spacing:-.5px}
+.price-ptb{color:#f8f9fa}
+.price-cur-up{color:#4ade80}
+.price-cur-down{color:#f97316}
+.diff-badge{font-size:12px;font-weight:700;padding:2px 7px;border-radius:4px}
+.diff-up{background:#14532d;color:#4ade80}
+.diff-down{background:#431407;color:#f97316}
+.diff-neutral{background:#1e293b;color:#94a3b8}
+.meta-row{display:flex;align-items:center;gap:16px;padding:6px 24px 8px;border-top:1px solid #1a1d27}
+.round-question{font-size:11px;color:#475569;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.countdown{font-size:22px;font-weight:700;font-family:monospace;min-width:70px;text-align:right}
+.normal{color:#60a5fa}.urgent{color:#f59e0b}.expired{color:#ef4444}
+.bar-spacer{flex:1}
+
+/* Body 2-column */
+.body-grid{display:grid;grid-template-columns:3fr 2fr;flex:1;min-height:0}
+.left-pane{padding:14px;display:flex;flex-direction:column;gap:14px;border-right:1px solid #2d3148;overflow-y:auto}
+.right-pane{padding:14px;display:flex;flex-direction:column;gap:14px;overflow-y:auto}
+
+/* Cards */
+.card{background:#1a1d27;border:1px solid #2d3148;border-radius:8px;padding:14px;transition:border-color .3s,box-shadow .3s}
+.card.enter{border-color:#22c55e;box-shadow:0 0 20px rgba(34,197,94,.2)}
+.card-title{font-size:15px;font-weight:700;margin-bottom:12px;display:flex;align-items:center;gap:8px}
+.card-title.up{color:#22c55e}.card-title.down{color:#ef4444}
+.metrics{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:12px}
+.metric{background:#0f1117;border-radius:6px;padding:9px;text-align:center}
+.metric-label{font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px}
+.metric-value{font-size:18px;font-weight:700;font-family:monospace}
+.v-ask{color:#f8f9fa}.v-shares{color:#60a5fa}.v-bid{color:#f59e0b}.v-na{color:#475569}
+.conditions{display:flex;gap:6px;flex-wrap:wrap}
+.cond{padding:3px 9px;border-radius:4px;font-size:11px;font-weight:600}
+.cond.ok{background:#14532d;color:#4ade80}.cond.fail{background:#450a0a;color:#f87171}
+
+/* Right pane boxes */
+.box{background:#1a1d27;border:1px solid #2d3148;border-radius:8px;padding:14px}
+.box-title{font-size:11px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:1px;margin-bottom:10px}
+.balance-val{font-size:26px;font-weight:700;font-family:monospace;color:#f8f9fa}
+.balance-unit{font-size:13px;color:#64748b;margin-left:6px}
+
+/* Stats grid */
+.stats-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.stat-item{background:#0f1117;border-radius:6px;padding:10px;text-align:center}
+.stat-label{font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}
+.stat-value{font-size:20px;font-weight:700;font-family:monospace}
+.sv-total{color:#94a3b8}.sv-win{color:#4ade80}.sv-lose{color:#f87171}.sv-rate{color:#f59e0b}
+.pnl-box{background:#0f1117;border-radius:6px;padding:10px;text-align:center;margin-top:8px}
+.pnl-pos{color:#4ade80}.pnl-neg{color:#f87171}.pnl-zero{color:#f59e0b}
+
+/* Trade table */
+table{width:100%;border-collapse:collapse}
+th{text-align:left;padding:7px 10px;font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid #2d3148}
+td{padding:7px 10px;border-bottom:1px solid #1e2235;font-family:monospace;font-size:12px}
+tr:last-child td{border-bottom:none}
+.r-win{color:#4ade80;font-weight:700}.r-lose{color:#f87171;font-weight:700}.r-pending{color:#475569}
+
+/* Config footer */
+.config-bar{background:#161921;padding:7px 20px;border-top:1px solid #2d3148;display:flex;gap:20px;flex-wrap:wrap;flex-shrink:0}
+.cfg-item{font-size:11px;color:#64748b}.cfg-item span{color:#94a3b8;font-weight:600}
+.ts{font-size:10px;color:#374151;text-align:right;padding:3px 20px 5px;flex-shrink:0}
+.no-data{color:#475569;font-style:italic;text-align:center;padding:24px}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>&#8383; Polymarket BTC Up/Down 5m Bot</h1>
+  <div id="badge" class="badge">...</div>
+</div>
+
+<div id="traded-banner" class="traded-banner"></div>
+
+<div class="top-bar">
+  <div class="price-row">
+    <div class="price-panel">
+      <div class="price-panel-label">Price To Beat</div>
+      <div class="price-big price-ptb" id="ptb-val">--</div>
+    </div>
+    <div class="price-panel">
+      <div class="price-panel-label">
+        Current Price
+        <span class="diff-badge diff-neutral" id="diff-badge">--</span>
+      </div>
+      <div class="price-big price-cur-down" id="btc-price">--</div>
+    </div>
+  </div>
+  <div class="meta-row">
+    <div class="round-question" id="question">Đang tìm market...</div>
+    <div class="countdown normal" id="countdown">--:--</div>
+  </div>
+</div>
+
+<div class="body-grid">
+  <div class="left-pane" id="left-pane">
+    <div class="card"><div class="no-data">Đang kết nối...</div></div>
+    <div class="card"><div class="no-data">Đang kết nối...</div></div>
+  </div>
+
+  <div class="right-pane">
+    <div class="box">
+      <div class="box-title">Balance</div>
+      <div>
+        <span class="balance-val" id="balance-val">--</span>
+        <span class="balance-unit">USDC</span>
+      </div>
+    </div>
+
+    <div class="box">
+      <div class="box-title">Session Stats</div>
+      <div class="stats-grid">
+        <div class="stat-item">
+          <div class="stat-label">Trades</div>
+          <div class="stat-value sv-total" id="st-total">0</div>
+        </div>
+        <div class="stat-item">
+          <div class="stat-label">Win Rate</div>
+          <div class="stat-value sv-rate" id="st-rate">--%</div>
+        </div>
+        <div class="stat-item">
+          <div class="stat-label">Win</div>
+          <div class="stat-value sv-win" id="st-win">0</div>
+        </div>
+        <div class="stat-item">
+          <div class="stat-label">Lose</div>
+          <div class="stat-value sv-lose" id="st-lose">0</div>
+        </div>
+      </div>
+      <div class="pnl-box">
+        <div class="stat-label">Session P&amp;L</div>
+        <div class="stat-value pnl-zero" id="st-pnl" style="font-size:22px">$0.00</div>
+      </div>
+    </div>
+
+    <div class="box" style="flex:1;min-height:0;display:flex;flex-direction:column">
+      <div class="box-title">Trade History</div>
+      <div style="overflow-y:auto;flex:1">
+        <table>
+          <thead><tr><th>Time</th><th>Side</th><th>Sz</th><th>Mode</th><th>Result</th></tr></thead>
+          <tbody id="trade-body">
+            <tr><td colspan="5" style="text-align:center;color:#475569;padding:14px">Chưa có lệnh nào</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="config-bar" id="cfg-bar"></div>
+<div class="ts" id="ts"></div>
+
+<script>
+let endTimeMs = null;
+
+function condBadge(ok, label) {
+  return `<span class="cond ${ok?'ok':'fail'}">${ok?'✓':'✗'} ${label}</span>`;
+}
+
+function renderCard(side, d) {
+  const askVal = d.ask != null ? d.ask : 'N/A';
+  const askCls = d.ask != null ? 'v-ask' : 'v-na';
+  const shares = parseFloat(d.shares)||0;
+  const bid    = parseFloat(d.bid)||0;
+  const titleCls  = side==='UP' ? 'up' : 'down';
+  const enterCls  = d.enter ? ' enter' : '';
+  const enterTag  = d.enter ? '<span style="font-size:12px;color:#4ade80">— ĐỦ ĐIỀU KIỆN 🔔</span>' : '';
+  return `<div class="card${enterCls}">
+    <div class="card-title ${titleCls}">${side} ${enterTag}</div>
+    <div class="metrics">
+      <div class="metric">
+        <div class="metric-label">Best Ask</div>
+        <div class="metric-value ${askCls}">${askVal}</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Shares @99</div>
+        <div class="metric-value v-shares">${shares.toLocaleString('en',{maximumFractionDigits:0})}</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Bid @99</div>
+        <div class="metric-value v-bid">${bid.toLocaleString('en',{maximumFractionDigits:0})}</div>
+      </div>
+    </div>
+    <div class="conditions">
+      ${condBadge(d.c1,'Giá')}
+      ${condBadge(d.c2,'Supply')}
+      ${condBadge(d.c3,'Time')}
+      ${condBadge(d.c4,'Bid')}
+    </div>
+  </div>`;
+}
+
+function updateCountdown() {
+  const el = document.getElementById('countdown');
+  if (!endTimeMs) { el.textContent='--:--'; return; }
+  const secs = Math.max(0, Math.floor((endTimeMs - Date.now()) / 1000));
+  const m = String(Math.floor(secs/60)).padStart(2,'0');
+  const s = String(secs%60).padStart(2,'0');
+  el.textContent = `${m}:${s}`;
+  el.className = 'countdown ' + (secs===0?'expired':secs<90?'urgent':'normal');
+}
+
+async function fetchState() {
+  try {
+    const s = await fetch('/api/state').then(r=>r.json());
+    if (!s || !s.sides) return;
+
+    // Badge
+    const badge = document.getElementById('badge');
+    badge.textContent = s.dry_run ? 'DRY RUN' : '⚡ LIVE';
+    badge.className = 'badge ' + (s.dry_run ? 'badge-dry' : 'badge-live');
+
+    // Round
+    document.getElementById('question').textContent = s.round?.question || '...';
+    if (s.round?.end_time) endTimeMs = new Date(s.round.end_time).getTime();
+
+    // Price To Beat
+    if (s.price_to_beat) {
+      document.getElementById('ptb-val').textContent =
+        '$' + s.price_to_beat.toLocaleString('en',{minimumFractionDigits:2,maximumFractionDigits:2});
+    }
+
+    // Current Price + diff
+    if (s.btc_price) {
+      const p   = s.btc_price;
+      const ptb = s.price_to_beat || 0;
+      const priceEl = document.getElementById('btc-price');
+      const diffEl  = document.getElementById('diff-badge');
+      priceEl.textContent = '$' + p.toLocaleString('en',{minimumFractionDigits:2,maximumFractionDigits:2});
+      if (ptb) {
+        const diff = p - ptb;
+        const arr  = diff >= 0 ? '▲' : '▼';
+        diffEl.textContent  = `${arr} $${Math.abs(diff).toLocaleString('en',{maximumFractionDigits:0})}`;
+        if (diff > 0) {
+          diffEl.className  = 'diff-badge diff-up';
+          priceEl.className = 'price-big price-cur-up';
+        } else if (diff < 0) {
+          diffEl.className  = 'diff-badge diff-down';
+          priceEl.className = 'price-big price-cur-down';
+        } else {
+          diffEl.className  = 'diff-badge diff-neutral';
+          priceEl.className = 'price-big price-ptb';
+        }
+      } else {
+        diffEl.textContent  = '--';
+        diffEl.className    = 'diff-badge diff-neutral';
+        priceEl.className   = 'price-big price-cur-down';
+      }
+    }
+
+    // Balance
+    if (s.balance != null) {
+      document.getElementById('balance-val').textContent = s.balance.toFixed(2);
+    }
+
+    // Traded side banner
+    const banner = document.getElementById('traded-banner');
+    if (s.traded && s.traded_side) {
+      const isUp = s.traded_side === 'UP';
+      banner.textContent = `▶ ĐÃ ĐẶT LỆNH: ${s.traded_side} ${s.dry_run ? '(DRY RUN)' : '(LIVE)'}`;
+      banner.className = 'traded-banner ' + (isUp ? 'traded-up' : 'traded-down');
+    } else {
+      banner.className = 'traded-banner';
+      banner.textContent = '';
+    }
+
+    // Cards
+    let html = '';
+    for (const side of ['UP','DOWN']) {
+      if (s.sides[side]) html += renderCard(side, s.sides[side]);
+    }
+    document.getElementById('left-pane').innerHTML = html;
+
+    // Config
+    if (s.cfg) {
+      const c = s.cfg;
+      document.getElementById('cfg-bar').innerHTML =
+        `<div class="cfg-item">Target <span>${c.target}</span></div>`+
+        `<div class="cfg-item">MaxShares <span>${c.max_shares.toLocaleString()}</span></div>`+
+        `<div class="cfg-item">OrderSize <span>${c.order_size}</span></div>`+
+        `<div class="cfg-item">TimeWindow <span>${c.time_window}s</span></div>`+
+        `<div class="cfg-item">MaxBid <span>${c.max_bid.toLocaleString()}</span></div>`;
+    }
+
+    document.getElementById('ts').textContent = 'Last update: ' + new Date(s.ts).toLocaleTimeString();
+  } catch(e) {}
+}
+
+async function fetchTrades() {
+  try {
+    const trades = await fetch('/api/trades').then(r=>r.json());
+    const tbody = document.getElementById('trade-body');
+
+    if (!trades || !trades.length) {
+      document.getElementById('st-pnl').textContent = '$0.00';
+      return;
+    }
+
+    // Session stats
+    const wins    = trades.filter(t=>t.result==='WIN').length;
+    const loses   = trades.filter(t=>t.result==='LOSE').length;
+    const settled = wins + loses;
+    document.getElementById('st-total').textContent = trades.length;
+    document.getElementById('st-win').textContent   = wins;
+    document.getElementById('st-lose').textContent  = loses;
+    document.getElementById('st-rate').textContent  = settled>0 ? (wins/settled*100).toFixed(0)+'%' : '--%';
+
+    // P&L: WIN = +size*(1-price), LOSE = -size*price
+    let pnl = 0;
+    trades.forEach(t => {
+      if (!t.dry_run && t.price != null && t.size != null) {
+        if (t.result === 'WIN')  pnl += t.size * (1.0 - t.price);
+        else if (t.result === 'LOSE') pnl -= t.size * t.price;
+      }
+    });
+    const pnlEl  = document.getElementById('st-pnl');
+    const settled2 = trades.filter(t=>!t.dry_run && (t.result==='WIN'||t.result==='LOSE')).length;
+    if (settled2 === 0) {
+      pnlEl.textContent = '$0.00';
+      pnlEl.className = 'stat-value pnl-zero';
+    } else {
+      const sign = pnl >= 0 ? '+' : '';
+      pnlEl.textContent = sign + '$' + pnl.toFixed(2);
+      pnlEl.className = 'stat-value ' + (pnl > 0 ? 'pnl-pos' : pnl < 0 ? 'pnl-neg' : 'pnl-zero');
+    }
+
+    // Trade rows
+    tbody.innerHTML = trades.map(t => {
+      const tm = new Date(t.time).toLocaleTimeString();
+      let resCls, resTxt;
+      if (t.result === 'WIN')          { resCls='r-win';     resTxt='WIN'; }
+      else if (t.result === 'LOSE')    { resCls='r-lose';    resTxt='LOSE'; }
+      else if (t.result === 'UNFILLED'){ resCls='r-pending'; resTxt='NO FILL'; }
+      else                             { resCls='r-pending'; resTxt='...'; }
+      return `<tr><td>${tm}</td><td>${t.side}</td><td>${t.size}</td><td>${t.dry_run?'DRY':'LIVE'}</td><td class="${resCls}">${resTxt}</td></tr>`;
+    }).join('');
+  } catch(e) {}
+}
+
+setInterval(updateCountdown, 1000);
+setInterval(fetchState, 300);
+setInterval(fetchTrades, 2000);
+fetchState(); fetchTrades();
+</script>
+</body>
+</html>

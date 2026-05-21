@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(python --version)",
+      "WebFetch(domain:docs.polymarket.com)",
+      "PowerShell(pip index versions py-clob-client 2>&1)",
+      "PowerShell(python -m pip index versions py-clob-client 2>&1)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:pypi.org)",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:agentbets.ai)",
+      "WebFetch(domain:tradoxvps.com)",
+      "WebFetch(domain:gist.github.com)",
+      "PowerShell(& \"C:\\\\Users\\\\qp166\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python314\\\\python.exe\" -m pip install --upgrade py-clob-client-v2 2>&1)",
+      "PowerShell(& \"C:\\\\Users\\\\qp166\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python314\\\\python.exe\" -m pip install py-builder-relayer-client 2>&1)",
+      "PowerShell(Remove-Item -Path \"c:\\\\Users\\\\qp166\\\\pbot-9\\\\bot.py\" -Confirm:$false)",
+      "PowerShell(pip install flask -q)",
+      "PowerShell(python -c \"import flask; print\\('Flask', flask.__version__, 'OK'\\)\")",
+      "PowerShell(python -c \"import flask; print\\('Flask', flask.__version__\\)\")",
+      "PowerShell(head -100)",
+      "PowerShell(python -m pip install web3 2>&1)",
+      "PowerShell(& \"C:\\\\Users\\\\qp166\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python314\\\\python.exe\" -m pip install web3 2>&1)",
+      "PowerShell(tail -3)",
+      "PowerShell(python -c \"import web3; print\\('web3', web3.__version__\\)\" 2>&1)",
+      "PowerShell(python -c \"import eth_abi; print\\('eth_abi ok'\\)\" 2>&1)",
+      "PowerShell(& python -c \"import web3; print\\('web3', web3.__version__\\)\")",
+      "PowerShell(& python -c \"import eth_abi; print\\('eth_abi ok'\\)\")"
+    ]
+  }
+}
