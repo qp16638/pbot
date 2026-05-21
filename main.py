@@ -311,18 +311,7 @@ def _run_one_round(spec: MarketSpec, pm: PolymarketClient, cfg, log) -> None:
                 _update_pnl(result, actual_size, cfg, log)
                 dashboard.update_trade_result(tag, result)
                 if result == "WIN" and not cfg.dry_run:
-                    log.info("[%s] Redeem win token %s...", tag, _pending_result["token_id"][:14])
-                    ok = pm.redeem_position(_pending_result["token_id"])
-                    if ok:
-                        log.info("[%s] Redeem thanh cong.", tag)
-                        try:
-                            new_bal = pm.get_usdc_balance()
-                            log.info("[%s][BALANCE] Sau redeem: $%.2f", tag, new_bal)
-                            dashboard.update_global(balance=new_bal)
-                        except Exception as e:
-                            log.debug("[%s] Loi refresh balance: %s", tag, e)
-                    else:
-                        log.warning("[%s] Redeem that bai (co the Polymarket da auto-redeem).", tag)
+                    _do_redeem(tag, _pending_result["token_id"], pm, log)
             else:
                 log.info("[%s] Chua xac dinh duoc ket qua", tag)
 
@@ -419,6 +408,28 @@ def _retry_find_market(spec: MarketSpec, pm: PolymarketClient, log) -> dict | No
         log.warning("[%s] Khong tim thay (lan %d/10), thu lai sau 15s...", tag, i)
         time.sleep(15)
     return None
+
+
+def _do_redeem(tag: str, token_id: str, pm: PolymarketClient, log) -> None:
+    """Retry redeem tối đa 4 lần, mỗi lần cách nhau 60s.
+    Polymarket cần ~2-3 phút settle on-chain sau khi round kết thúc.
+    """
+    for attempt in range(1, 5):
+        log.info("[%s] Redeem win token %s... (lan %d/4)", tag, token_id[:14], attempt)
+        ok = pm.redeem_position(token_id)
+        if ok:
+            log.info("[%s] Redeem thanh cong.", tag)
+            try:
+                new_bal = pm.get_usdc_balance()
+                log.info("[%s][BALANCE] Sau redeem: $%.2f", tag, new_bal)
+                dashboard.update_global(balance=new_bal)
+            except Exception as e:
+                log.debug("[%s] Loi refresh balance: %s", tag, e)
+            return
+        if attempt < 4:
+            log.info("[%s] Redeem chua duoc (settle chua xong), thu lai sau 60s...", tag)
+            time.sleep(60)
+    log.warning("[%s] Redeem that bai sau 4 lan thu.", tag)
 
 
 def _update_pnl(result: str, size: int, cfg, log) -> None:
