@@ -310,6 +310,19 @@ def _run_one_round(spec: MarketSpec, pm: PolymarketClient, cfg, log) -> None:
                     _trade_stats[tag]["lose"] += 1
                 _update_pnl(result, actual_size, cfg, log)
                 dashboard.update_trade_result(tag, result)
+                if result == "WIN" and not cfg.dry_run:
+                    log.info("[%s] Redeem win token %s...", tag, _pending_result["token_id"][:14])
+                    ok = pm.redeem_position(_pending_result["token_id"])
+                    if ok:
+                        log.info("[%s] Redeem thanh cong.", tag)
+                        try:
+                            new_bal = pm.get_usdc_balance()
+                            log.info("[%s][BALANCE] Sau redeem: $%.2f", tag, new_bal)
+                            dashboard.update_global(balance=new_bal)
+                        except Exception as e:
+                            log.debug("[%s] Loi refresh balance: %s", tag, e)
+                    else:
+                        log.warning("[%s] Redeem that bai (co the Polymarket da auto-redeem).", tag)
             else:
                 log.info("[%s] Chua xac dinh duoc ket qua", tag)
 
