@@ -1,9 +1,12 @@
 """Bot snipe Polymarket BTC Up/Down 5m — canh đặt lệnh trong X giây cuối round."""
 
+import csv
+import pathlib
 import signal
 import sys
 import time
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Optional
 
 import config as cfg_module
@@ -13,6 +16,13 @@ from polymarket import PolymarketClient
 
 _running     = True
 _session_pnl = 0.0
+
+_trade_stats = {"placed": 0, "filled": 0, "unfilled": 0, "win": 0, "lose": 0}
+_rev_stats   = {"win": 0, "lose": 0}
+
+REVERSAL_CSV = pathlib.Path("reversals.csv")
+_HIGH_ASK    = Decimal("0.99")
+
 
 def _on_signal(sig, frame):
     global _running
@@ -100,10 +110,12 @@ def _run_one_round(pm: PolymarketClient, cfg, log) -> None:
         log.info("[SNIPE] BTC open (Binance 5m) = %s", btc_open)
 
     # ── 3. Vòng lặp check ─────────────────────────────────────────────────────
-    traded_this_round            = False
-    traded_side: str             = ""
+    traded_this_round               = False
+    traded_side: str                = ""
     _pending_result: Optional[dict] = None
     btc_current: Optional[float]    = None
+    last_ob_fetch                   = 0.0
+    last_high_ask_obs: dict[str, Optional[Decimal]] = {}
 
     while _running:
         now = datetime.now(timezone.utc)
@@ -118,9 +130,10 @@ def _run_one_round(pm: PolymarketClient, cfg, log) -> None:
             time.sleep(1)
             continue
 
-        # Trong 10s cuối: fetch OB + BTC tick mỗi 200ms
+        # Fetch OB: 10s cuoi moi 200ms, ngoai 10s moi 5s (tu dau round)
         if end_time:
             secs_now = (end_time - now).total_seconds()
+            now_ts   = time.time()
             if 0 < secs_now <= 10:
                 for tid in tokens.values():
                     pm.fetch_orderbook_rest(tid)
@@ -128,6 +141,11 @@ def _run_one_round(pm: PolymarketClient, cfg, log) -> None:
                 if btc_current and btc_open:
                     log.debug("[SNIPE] open=%.2f cur=%.2f diff=%+.2f",
                               btc_open, btc_current, btc_current - btc_open)
+            elif secs_now > 0 and now_ts - last_ob_fetch >= 5.0:
+                for tid in tokens.values():
+                    pm.fetch_orderbook_rest(tid)
+                last_ob_fetch = now_ts
+                btc_current   = None
             else:
                 btc_current = None
 
@@ -151,6 +169,13 @@ def _run_one_round(pm: PolymarketClient, cfg, log) -> None:
             f"\r[SNIPE] con={secs_left:.0f}s | diff={diff_str} | {'  |  '.join(side_parts)}    "
         )
         sys.stdout.flush()
+
+        # Cap nhat high-ask observation cho reversal tracking
+        for side, res in side_results.items():
+            if res.best_ask is None or res.best_ask >= _HIGH_ASK:
+                last_high_ask_obs[side] = res.best_ask
+            else:
+                last_high_ask_obs.pop(side, None)
 
         # Đặt lệnh nếu đủ điều kiện
         for side, token_id in tokens.items():
@@ -178,6 +203,7 @@ def _run_one_round(pm: PolymarketClient, cfg, log) -> None:
                         "token_id": token_id, "side": side,
                         "slug": market_slug, "order_id": order_id,
                     }
+                    _trade_stats["placed"] += 1
 
             traded_this_round = True
             traded_side = side
@@ -205,7 +231,9 @@ def _run_one_round(pm: PolymarketClient, cfg, log) -> None:
         if filled_size == 0.0 and order_id:
             log.info("[RESULT] Chua fill — huy order")
             pm.cancel_order(order_id)
+            _trade_stats["unfilled"] += 1
         else:
+            _trade_stats["filled"] += 1
             actual_size = int(filled_size) if filled_size > 0 else cfg.order_size
             result = pm.check_round_result(
                 _pending_result["token_id"],
@@ -215,11 +243,74 @@ def _run_one_round(pm: PolymarketClient, cfg, log) -> None:
             if result:
                 log.info("[RESULT] %s (side=%s, fill=%.0f)",
                          result, _pending_result["side"], filled_size)
+                if result == "WIN":
+                    _trade_stats["win"] += 1
+                elif result == "LOSE":
+                    _trade_stats["lose"] += 1
                 _update_pnl(result, actual_size, cfg, log)
             else:
                 log.info("[RESULT] Chua xac dinh duoc ket qua")
 
+        log.info("[STATS] Lenh: %d dat | %d khop | %d ko khop | W/L: %d/%d",
+                 _trade_stats["placed"], _trade_stats["filled"],
+                 _trade_stats["unfilled"], _trade_stats["win"], _trade_stats["lose"])
+
+    # Reversal tracking (chay moi round co high-ask obs)
+    if last_high_ask_obs:
+        if not _pending_result:
+            log.info("[TRACK] Doi 30s de Polymarket resolve...")
+            time.sleep(30)
+        _check_reversal(pm, tokens, last_high_ask_obs, market_slug, end_time, log)
+
     time.sleep(3)
+
+
+def _check_reversal(pm, tokens, obs, slug, round_end, log) -> None:
+    results: dict[str, Optional[str]] = {}
+    for side, ask_val in obs.items():
+        token_id = tokens.get(side)
+        if token_id:
+            results[side] = pm.check_round_result(token_id, side, slug or "")
+        else:
+            results[side] = None
+
+    for side, ask_val in obs.items():
+        result  = results.get(side)
+        ask_str = str(ask_val) if ask_val is not None else "N/A"
+        is_rev  = result == "LOSE"
+        if result == "WIN":
+            _rev_stats["win"] += 1
+        elif result == "LOSE":
+            _rev_stats["lose"] += 1
+        log.info("[TRACK] %s ask=%s -> %s%s",
+                 side, ask_str, result or "?",
+                 "  *** DAO CHIEU!" if is_rev else "")
+
+    log.info("[TRACK] W/L: %d/%d (dao chieu: %d)",
+             _rev_stats["win"], _rev_stats["lose"], _rev_stats["lose"])
+
+    _save_reversal_csv(obs, results, slug, round_end, log)
+
+
+def _save_reversal_csv(obs, results, slug, round_end, log) -> None:
+    exists = REVERSAL_CSV.exists()
+    try:
+        with open(REVERSAL_CSV, "a", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            if not exists:
+                w.writerow(["round_end_utc", "slug", "side", "ask", "result", "is_reversal"])
+            for side, ask_val in obs.items():
+                result = results.get(side)
+                w.writerow([
+                    round_end.strftime("%Y-%m-%d %H:%M:%S") if round_end else "",
+                    slug or "",
+                    side,
+                    str(ask_val) if ask_val is not None else "N/A",
+                    result or "?",
+                    "YES" if result == "LOSE" else "NO",
+                ])
+    except Exception as e:
+        log.debug("[TRACK] Loi ghi CSV: %s", e)
 
 
 def _place_order_safe(pm: PolymarketClient, token_id: str, cfg, log) -> Optional[str]:
